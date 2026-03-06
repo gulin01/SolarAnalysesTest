@@ -5,7 +5,6 @@ import { useDropzone } from 'react-dropzone'
 import { useRouter } from 'next/navigation'
 import { Upload, FileBox, AlertCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { apiClient } from '@/lib/api'
 import { useModelStore } from '@/stores/modelStore'
 import { ModelMeta } from '@/lib/types'
 import { toast } from 'sonner'
@@ -53,9 +52,19 @@ export default function UploadDropzone({ projectId }: UploadDropzoneProps) {
         xhr.open('POST', `${process.env.NEXT_PUBLIC_FASTAPI_URL}/api/models/upload`)
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) {
-            resolve(JSON.parse(xhr.responseText))
+            try {
+              resolve(JSON.parse(xhr.responseText))
+            } catch {
+              reject(new Error('Invalid response from server'))
+            }
           } else {
-            reject(new Error(`Upload failed: ${xhr.statusText}`))
+            // Show the actual server error message if available
+            let detail = xhr.statusText
+            try {
+              const body = JSON.parse(xhr.responseText)
+              detail = body?.detail ?? detail
+            } catch { /* ignore parse errors */ }
+            reject(new Error(`Upload failed (${xhr.status}): ${detail}`))
           }
         }
         xhr.onerror = () => reject(new Error('Network error during upload'))
@@ -66,11 +75,8 @@ export default function UploadDropzone({ projectId }: UploadDropzoneProps) {
       setMetadata(model)
       setModelUrl(model.normalized_glb_url)
 
-      await apiClient.patch(`/projects/${projectId}`, {
-        model_id: model.id,
-        current_step: 'place',
-      })
-
+      // The backend already linked model_id to the project during upload.
+      // Just redirect to place step.
       toast.success('Model uploaded successfully')
       router.push(`/projects/${projectId}/place`)
     } catch (err: any) {
