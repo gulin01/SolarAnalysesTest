@@ -20,6 +20,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY worker/install_radiance.sh /install_radiance.sh
 RUN bash /install_radiance.sh || echo "[install_radiance] Skipping — Radiance not available for this platform/version (synthetic fallback will be used)"
 
+# Expose Radiance binaries to PATH at runtime (install_radiance.sh writes
+# /etc/environment which Docker does not source)
+ENV PATH="/usr/local/radiance/bin:${PATH}"
+ENV RAYPATH="/usr/local/radiance/lib"
+
 WORKDIR /app
 
 # Copy and install Python deps (same as backend + ladybug extras)

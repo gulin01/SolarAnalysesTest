@@ -101,8 +101,8 @@ def run_analysis(
                     mesh, face_map, face_count, up,
                     epw, config, progress_cb
                 )
-            except (ImportError, ModuleNotFoundError) as e:
-                logger.warning("Ladybug sub-module missing for hourly (%s); using synthetic", e)
+            except (ImportError, ModuleNotFoundError, AssertionError) as e:
+                logger.warning("Ladybug/Radiance unavailable for hourly (%s); using synthetic", e)
                 return _synthetic_result(mesh, placement, config, str(e), n=face_count)
         else:
             try:
@@ -110,8 +110,8 @@ def run_analysis(
                     mesh, face_map, face_count,
                     epw, epw_path, config, placement, progress_cb, study_mesh, up
                 )
-            except (ImportError, ModuleNotFoundError) as e:
-                logger.warning("Ladybug sub-module missing for annual (%s); using synthetic", e)
+            except (ImportError, ModuleNotFoundError, AssertionError) as e:
+                logger.warning("Ladybug/Radiance unavailable for annual (%s); using synthetic", e)
                 return _synthetic_result(mesh, placement, config, str(e), n=face_count)
 
 
