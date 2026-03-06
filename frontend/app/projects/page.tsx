@@ -1,19 +1,11 @@
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
-import { Plus, Sun, ArrowRight } from 'lucide-react'
+import { Plus, Sun } from 'lucide-react'
 import { fetchProjects } from '@/lib/api'
 import { Project } from '@/lib/types'
-import { formatDistanceToNow } from 'date-fns'
+import { ProjectCard } from '@/components/projects/ProjectCard'
 
 export const dynamic = 'force-dynamic'
-
-const stepLabels: Record<string, string> = {
-  upload: 'Upload',
-  place: 'Placement',
-  analyze: 'Analysis',
-  results: 'Results',
-}
 
 async function ProjectsPage() {
   let projects: Project[] = []
@@ -51,26 +43,7 @@ async function ProjectsPage() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {projects.map((project) => (
-              <Card key={project.id} className="hover:shadow-md transition-shadow">
-                <CardHeader>
-                  <CardTitle className="text-lg">{project.name}</CardTitle>
-                  <CardDescription>
-                    Step: <span className="font-medium text-foreground">{stepLabels[project.current_step]}</span>
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-sm text-muted-foreground">
-                    Updated {formatDistanceToNow(new Date(project.updated_at), { addSuffix: true })}
-                  </p>
-                </CardContent>
-                <CardFooter>
-                  <Link href={`/projects/${project.id}/${project.current_step}`} className="w-full">
-                    <Button variant="outline" className="w-full gap-2">
-                      Continue <ArrowRight className="h-4 w-4" />
-                    </Button>
-                  </Link>
-                </CardFooter>
-              </Card>
+              <ProjectCard key={project.id} project={project} />
             ))}
           </div>
         )}

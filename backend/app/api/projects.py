@@ -95,8 +95,32 @@ async def delete_project(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    from app.core.storage import delete_object
+    from app.models.model import Model3D
+
     project = await db.get(Project, project_id)
     if not project or project.user_id != user_id:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    # Delete analysis result files from storage (jobs cascade-deleted via DB relationship)
+    for job in project.analysis_jobs:
+        if job.result_path:
+            try:
+                delete_object(job.result_path)
+            except Exception:
+                pass
+
+    # Delete model files from storage and the Model3D row
+    if project.model_id:
+        model = await db.get(Model3D, project.model_id)
+        if model:
+            for path in [model.original_file_path, model.normalized_glb_path]:
+                if path:
+                    try:
+                        delete_object(path)
+                    except Exception:
+                        pass
+            await db.delete(model)
+
     await db.delete(project)
     await db.commit()
