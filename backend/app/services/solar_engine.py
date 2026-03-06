@@ -110,8 +110,8 @@ def run_analysis(
                     mesh, face_map, face_count,
                     epw, epw_path, config, placement, progress_cb, study_mesh, up
                 )
-            except (ImportError, ModuleNotFoundError) as e:
-                logger.warning("Ladybug sub-module missing for annual (%s); using synthetic", e)
+            except (ImportError, ModuleNotFoundError, AssertionError) as e:
+                logger.warning("Annual radiation study unavailable (%s); using synthetic fallback", e)
                 return _synthetic_result(mesh, placement, config, str(e), n=face_count)
 
 
