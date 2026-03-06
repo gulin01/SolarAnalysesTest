@@ -1,8 +1,9 @@
 'use client'
 
-import { Suspense, useRef } from 'react'
+import { Suspense, useMemo } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, useGLTF, Center, Bounds } from '@react-three/drei'
+import * as THREE from 'three'
 import { useModelStore } from '@/stores/modelStore'
 
 interface ThreePreviewProps {
@@ -10,9 +11,23 @@ interface ThreePreviewProps {
   modelId: string
 }
 
+const PREVIEW_MATERIAL = new THREE.MeshStandardMaterial({
+  color: new THREE.Color(0.72, 0.72, 0.75),
+  roughness: 0.65,
+  metalness: 0.05,
+  side: THREE.DoubleSide,
+})
+
 function Model({ url }: { url: string }) {
   const { scene } = useGLTF(url)
-  return <primitive object={scene} />
+  const cloned = useMemo(() => {
+    const clone = scene.clone(true)
+    clone.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) obj.material = PREVIEW_MATERIAL
+    })
+    return clone
+  }, [scene])
+  return <primitive object={cloned} />
 }
 
 export default function ThreePreview({ projectId, modelId }: ThreePreviewProps) {
@@ -21,8 +36,10 @@ export default function ThreePreview({ projectId, modelId }: ThreePreviewProps) 
 
   return (
     <Canvas camera={{ position: [5, 5, 5], fov: 50 }} shadows>
-      <ambientLight intensity={0.6} />
-      <directionalLight position={[10, 10, 5]} intensity={1} castShadow />
+      {/* Three.js r155+ uses physically-correct lighting (lux/candela) */}
+      <ambientLight intensity={1.0} />
+      <hemisphereLight args={['#c8d8f0', '#444450', 2.5]} />
+      <directionalLight position={[10, 10, 5]} intensity={3.5} castShadow />
       <Suspense fallback={null}>
         <Bounds fit clip observe>
           <Center>

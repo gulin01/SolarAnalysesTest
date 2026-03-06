@@ -252,6 +252,14 @@ export default function HeatmapViewer({ projectId, modelGlbUrl, latestJobId }: H
     enabled: !!latestJobId,
   })
 
+  // Auto-switch to heatmap view when results first become available
+  const hasHeatmap = (results?.heatmap_cells?.length ?? 0) > 0
+  useEffect(() => {
+    if (hasHeatmap && viewMode === 'model') {
+      setViewMode('heatmap')
+    }
+  }, [hasHeatmap]) // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!modelGlbUrl) {
     return (
       <div className="h-full flex items-center justify-center text-muted-foreground">
@@ -268,9 +276,12 @@ export default function HeatmapViewer({ projectId, modelGlbUrl, latestJobId }: H
     <div className="h-full flex">
       <div className="flex-1 relative">
         <Canvas camera={{ position: [10, 10, 10], fov: 50 }}>
-          <hemisphereLight args={['#c8d8f0', '#444450', 0.8]} />
-          <directionalLight position={[15, 25, 15]} intensity={1.2} />
-          <directionalLight position={[-10, 15, -10]} intensity={0.4} />
+          {/* Three.js r155+ uses physically-correct lighting (lux/candela).
+              Intensities must be much higher than legacy arbitrary values. */}
+          <ambientLight intensity={1.0} />
+          <hemisphereLight args={['#c8d8f0', '#444450', 2.5]} />
+          <directionalLight position={[15, 25, 15]} intensity={3.5} />
+          <directionalLight position={[-10, 15, -10]} intensity={1.5} />
           <Suspense fallback={null}>
             <Bounds fit clip observe>
               <Center>
