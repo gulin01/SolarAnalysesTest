@@ -86,8 +86,12 @@ def run_solar_analysis(self, job_id: str):
         # Download model GLB
         glb_bytes = download_bytes(model_data["normalized_glb_path"])
 
-        # Download or locate EPW file
-        epw_path = _get_epw_path(config["epw_station_id"])
+        # Download or locate EPW file — use placement coordinates for the most
+        # accurate PVGIS TMY download; fall back to station-only cache if missing.
+        placement = project_data.get("placement") or {}
+        epw_lat = placement.get("latitude")
+        epw_lon = placement.get("longitude")
+        epw_path = _get_epw_path(config["epw_station_id"], lat=epw_lat, lon=epw_lon)
 
         result = run_analysis(
             glb_bytes=glb_bytes,
@@ -156,19 +160,55 @@ async def _async_fetch_job_data(job_id: str) -> tuple[dict, dict, dict]:
     )
 
 
-def _get_epw_path(station_id: str) -> str:
+def _get_epw_path(station_id: str, lat: float | None = None, lon: float | None = None) -> str:
     """
-    Return local path to EPW file for the given station.
-    Downloads from Climate.OneBuilding if not cached.
+    Return local path to a real EPW/TMY weather file.
+
+    Strategy:
+    1. If lat/lon are provided, download a Typical Meteorological Year (TMY) file
+       for that exact location from PVGIS (EU Joint Research Centre, free, no API key).
+       Cache key is lat/lon rounded to 2 decimal places (~1 km grid).
+    2. Fall back to the station_id-based cache path so the solar engine can attempt
+       the load and degrade gracefully if the file is still missing.
     """
+    import httpx
+
     cache_dir = Path("/tmp/epw_cache")
     cache_dir.mkdir(exist_ok=True)
-    epw_file = cache_dir / f"{station_id}.epw"
+
+    # Prefer location-based cache when coordinates are available
+    if lat is not None and lon is not None:
+        cache_key = f"{round(lat, 2)}_{round(lon, 2)}"
+        epw_file = cache_dir / f"{cache_key}.epw"
+    else:
+        epw_file = cache_dir / f"{station_id}.epw"
 
     if epw_file.exists():
+        logger.info("EPW cache hit: %s", epw_file)
         return str(epw_file)
 
-    # EPW files are indexed by station_id which encodes the download URL slug.
-    # In production, pre-cache on first use from Climate.OneBuilding.Org
-    # For now return a placeholder path — the solar engine handles missing EPW gracefully.
+    if lat is None or lon is None:
+        logger.warning(
+            "No coordinates for EPW download (station=%s); analysis will use synthetic fallback",
+            station_id,
+        )
+        return str(epw_file)
+
+    pvgis_url = (
+        f"https://re.jrc.ec.europa.eu/api/v5_2/tmy"
+        f"?lat={lat}&lon={lon}&outputformat=epw&usehorizon=1"
+    )
+    logger.info("Downloading TMY EPW from PVGIS for (%.4f, %.4f) → %s", lat, lon, epw_file)
+    try:
+        with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+            resp = client.get(pvgis_url)
+            resp.raise_for_status()
+        epw_file.write_bytes(resp.content)
+        logger.info("EPW saved (%d bytes): %s", len(resp.content), epw_file)
+    except Exception as exc:
+        logger.warning(
+            "PVGIS EPW download failed for (%.4f, %.4f): %s — analysis will use synthetic fallback",
+            lat, lon, exc,
+        )
+
     return str(epw_file)

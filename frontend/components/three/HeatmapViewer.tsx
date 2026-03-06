@@ -1,6 +1,6 @@
 'use client'
 
-import { Suspense, useMemo, useRef, useCallback } from 'react'
+import { Suspense, useMemo, useRef, useCallback, useEffect } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
 import { OrbitControls, useGLTF, Center, Bounds, Html } from '@react-three/drei'
 import * as THREE from 'three'
@@ -143,7 +143,7 @@ function HeatmapInspector({
     [heatmapMesh, cells, unit, camera, gl, addInspectionPoint],
   )
 
-  useMemo(() => {
+  useEffect(() => {
     gl.domElement.addEventListener('click', handleClick)
     return () => gl.domElement.removeEventListener('click', handleClick)
   }, [gl, handleClick])
@@ -285,13 +285,14 @@ export default function HeatmapViewer({ projectId, modelGlbUrl, latestJobId }: H
           <gridHelper args={[20, 20]} />
         </Canvas>
 
-        {results && viewMode === 'heatmap' && (
-          <ColorLegend
-            min={results.statistics.min}
-            max={results.statistics.max}
-            unit={results.unit}
-          />
-        )}
+        {results && viewMode === 'heatmap' && (() => {
+          // Use the same non-zero range used for coloring, not statistics.min/max
+          // (statistics include zeros for non-selected faces, which skews the legend).
+          const nonZeroVals = (results.heatmap_cells ?? []).map((c) => c.value).filter((v) => v > 0)
+          const legendMin = nonZeroVals.length ? Math.min(...nonZeroVals) : results.statistics.min
+          const legendMax = nonZeroVals.length ? Math.max(...nonZeroVals) : results.statistics.max
+          return <ColorLegend min={legendMin} max={legendMax} unit={results.unit} />
+        })()}
 
         {/* View mode toggle */}
         <div className="absolute top-4 left-1/2 -translate-x-1/2 flex gap-2 bg-background/90 rounded-full p-1 backdrop-blur shadow">
