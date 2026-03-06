@@ -164,19 +164,34 @@ def _get_epw_path(station_id: str, lat: float | None = None, lon: float | None =
     """
     Return local path to a real EPW/TMY weather file.
 
-    Strategy:
-    1. If lat/lon are provided, download a Typical Meteorological Year (TMY) file
-       for that exact location from PVGIS (EU Joint Research Centre, free, no API key).
-       Cache key is lat/lon rounded to 2 decimal places (~1 km grid).
-    2. Fall back to the station_id-based cache path so the solar engine can attempt
-       the load and degrade gracefully if the file is still missing.
+    Priority:
+    1. Any *.epw file dropped in backend/data/ or the project root (for local testing).
+    2. Per-location PVGIS download cached in /tmp/epw_cache/ (requires internet).
+    3. Station-id-based cache path — solar engine falls back to synthetic if missing.
     """
     import httpx
 
+    # 1. Check for manually placed EPW files in well-known locations.
+    #    Prefers seoul.epw if present; otherwise takes the first .epw found.
+    _backend_root = Path(__file__).parent.parent.parent  # backend/
+    _search_dirs = [
+        _backend_root / "data",
+        _backend_root,
+        Path.cwd(),
+    ]
+    for _dir in _search_dirs:
+        _seoul = _dir / "seoul.epw"
+        if _seoul.exists():
+            logger.info("Using local seoul.epw: %s", _seoul)
+            return str(_seoul)
+        for _epw in sorted(_dir.glob("*.epw")):
+            logger.info("Using local EPW file: %s", _epw)
+            return str(_epw)
+
+    # 2. PVGIS download (cached by lat/lon rounded to 2 decimal places ~ 1 km).
     cache_dir = Path("/tmp/epw_cache")
     cache_dir.mkdir(exist_ok=True)
 
-    # Prefer location-based cache when coordinates are available
     if lat is not None and lon is not None:
         cache_key = f"{round(lat, 2)}_{round(lon, 2)}"
         epw_file = cache_dir / f"{cache_key}.epw"
