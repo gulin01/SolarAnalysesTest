@@ -118,7 +118,7 @@ def _run_annual(mesh, face_map, face_count,
 
     north_angle = float(config.get("north_angle", 0))
     progress_cb(40, "Building sky matrix")
-    sky_mtx = SkyMatrix.from_epw(epw)
+    sky_mtx = SkyMatrix.from_epw(epw.file_path)
     sky_mtx.north = north_angle
 
     progress_cb(55, "Running annual radiation study")
