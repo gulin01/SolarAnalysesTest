@@ -96,15 +96,23 @@ def run_analysis(
         study_mesh, face_map = _build_study_mesh(mesh, face_mask)
 
         if mode == "hourly":
-            return _run_hourly(
-                mesh, face_map, face_count, up,
-                epw, config, progress_cb
-            )
+            try:
+                return _run_hourly(
+                    mesh, face_map, face_count, up,
+                    epw, config, progress_cb
+                )
+            except (ImportError, ModuleNotFoundError) as e:
+                logger.warning("Ladybug sub-module missing for hourly (%s); using synthetic", e)
+                return _synthetic_result(mesh, placement, config, str(e), n=face_count)
         else:
-            return _run_annual(
-                mesh, face_map, face_count,
-                epw, config, placement, progress_cb, study_mesh, up
-            )
+            try:
+                return _run_annual(
+                    mesh, face_map, face_count,
+                    epw, config, placement, progress_cb, study_mesh, up
+                )
+            except (ImportError, ModuleNotFoundError) as e:
+                logger.warning("Ladybug sub-module missing for annual (%s); using synthetic", e)
+                return _synthetic_result(mesh, placement, config, str(e), n=face_count)
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +121,7 @@ def run_analysis(
 
 def _run_annual(mesh, face_map, face_count,
                 epw, config, placement, progress_cb, study_mesh, up):
-    from ladybug.skymatrix import SkyMatrix
+    from ladybug_radiance.skymatrix import SkyMatrix
     from ladybug_radiance.study.radiation import RadiationStudy
 
     north_angle = float(config.get("north_angle", 0))
