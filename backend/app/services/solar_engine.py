@@ -130,9 +130,15 @@ def _run_annual(mesh, face_map, face_count,
     sky_mtx.north = north_angle
 
     progress_cb(55, "Running annual radiation study")
+    logger.info(
+        "RadiationStudy inputs: sky_mtx=%s, study_mesh type=%s faces=%d, offset=%.3f",
+        type(sky_mtx).__name__, type(study_mesh).__name__,
+        len(study_mesh.faces), float(config.get("sensor_height", 0.1)),
+    )
     study = RadiationStudy(
         sky_matrix=sky_mtx,
         study_mesh=study_mesh,
+        context_geometry=[study_mesh],
         offset_distance=float(config.get("sensor_height", 0.1)),
         by_vertex=False,
     )
