@@ -2,13 +2,9 @@
 
 End-to-end trace from model upload to coloured heatmap, including every
 bug found by deep analysis and how each was fixed.
-
 ---
-
 ## 1. Model Upload & Normalisation
-
 **File**: `backend/app/services/model_parser.py`
-
 ```
 uploaded file (any format)
     │
