@@ -108,7 +108,7 @@ def run_analysis(
             try:
                 return _run_annual(
                     mesh, face_map, face_count,
-                    epw, config, placement, progress_cb, study_mesh, up
+                    epw, epw_path, config, placement, progress_cb, study_mesh, up
                 )
             except (ImportError, ModuleNotFoundError) as e:
                 logger.warning("Ladybug sub-module missing for annual (%s); using synthetic", e)
@@ -120,13 +120,13 @@ def run_analysis(
 # ---------------------------------------------------------------------------
 
 def _run_annual(mesh, face_map, face_count,
-                epw, config, placement, progress_cb, study_mesh, up):
+                epw, epw_path, config, placement, progress_cb, study_mesh, up):
     from ladybug_radiance.skymatrix import SkyMatrix
     from ladybug_radiance.study.radiation import RadiationStudy
 
     north_angle = float(config.get("north_angle", 0))
     progress_cb(40, "Building sky matrix")
-    sky_mtx = SkyMatrix.from_epw(epw.file_path)
+    sky_mtx = SkyMatrix.from_epw(epw_path)
     sky_mtx.north = north_angle
 
     progress_cb(55, "Running annual radiation study")
