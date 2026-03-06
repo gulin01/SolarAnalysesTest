@@ -3,6 +3,8 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { WS_RECONNECT_MS } from '@/lib/constants'
 
+const MAX_RETRIES = 5
+
 interface WSMessage {
   type: string
   [key: string]: unknown
@@ -16,13 +18,19 @@ interface UseWebSocketOptions {
 export function useWebSocket(url: string | null, { onMessage, enabled = true }: UseWebSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const retriesRef = useRef(0)
   const onMessageRef = useRef(onMessage)
   onMessageRef.current = onMessage
 
   const connect = useCallback(() => {
     if (!url || !enabled) return
+
     const ws = new WebSocket(url)
     wsRef.current = ws
+
+    ws.onopen = () => {
+      retriesRef.current = 0
+    }
 
     ws.onmessage = (e) => {
       try {
@@ -34,15 +42,21 @@ export function useWebSocket(url: string | null, { onMessage, enabled = true }: 
     }
 
     ws.onclose = () => {
-      if (enabled) {
+      if (enabled && retriesRef.current < MAX_RETRIES) {
+        retriesRef.current += 1
         reconnectTimer.current = setTimeout(connect, WS_RECONNECT_MS)
       }
     }
 
-    ws.onerror = () => ws.close()
+    ws.onerror = () => {
+      if (ws.readyState !== WebSocket.CLOSED) {
+        ws.close()
+      }
+    }
   }, [url, enabled])
 
   useEffect(() => {
+    retriesRef.current = 0
     connect()
     return () => {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
