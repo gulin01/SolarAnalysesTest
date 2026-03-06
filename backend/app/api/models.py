@@ -3,11 +3,13 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import io
+from datetime import datetime, timezone
 
 from app.core.database import get_db
 from app.core.auth import get_current_user_id
 from app.core.storage import upload_bytes, download_bytes, delete_object
 from app.models.model import Model3D
+from app.models.project import Project
 from app.schemas.model import ModelMetaOut
 from app.services.model_parser import parse_and_convert
 
@@ -51,6 +53,15 @@ async def upload_model(
         ifc_metadata=result.get("ifc_metadata"),
     )
     db.add(model)
+    await db.flush()  # write model row so FK is satisfied before project update
+
+    # Atomically link the model to the project (avoids a separate PATCH from the frontend)
+    project = await db.get(Project, project_id)
+    if project and project.user_id == user_id:
+        project.model_id = model.id
+        project.current_step = "place"
+        project.updated_at = datetime.now(timezone.utc)
+
     await db.commit()
     await db.refresh(model)
     return ModelMetaOut.from_orm_with_url(model)
