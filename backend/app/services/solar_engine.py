@@ -67,32 +67,6 @@ def run_analysis(
 
         try:
             from ladybug.epw import EPW  # noqa: F401
-
-            progress_cb(15, "Loading weather data")
-            epw = EPW(epw_path)
-
-            progress_cb(25, "Building sensor grid")
-            up = _detect_up_vector(mesh.face_normals)
-            face_mask = _get_face_mask(mesh, config, up)
-            logger.info(
-                "Total faces: %d, Selected faces: %d, Surface filter: %s, Up: %s",
-                face_count, int(face_mask.sum()),
-                config.get("surface_filter", "all"), up.tolist(),
-            )
-
-            study_mesh, face_map = _build_study_mesh(mesh, face_mask)
-
-            if mode == "hourly":
-                return _run_hourly(
-                    mesh, face_map, face_count, up,
-                    epw, config, progress_cb
-                )
-            else:
-                return _run_annual(
-                    mesh, face_map, face_count,
-                    epw, config, placement, progress_cb, study_mesh
-                )
-
         except ImportError as e:
             logger.info(
                 "Ladybug not available (%s); using synthetic irradiance for %d faces",
@@ -100,13 +74,45 @@ def run_analysis(
             )
             return _synthetic_result(mesh, placement, config, str(e), n=face_count)
 
+        try:
+            progress_cb(15, "Loading weather data")
+            epw = EPW(epw_path)
+        except Exception as e:
+            logger.warning(
+                "EPW file could not be loaded (%s); using synthetic irradiance for %d faces",
+                e, face_count,
+            )
+            return _synthetic_result(mesh, placement, config, str(e), n=face_count)
+
+        progress_cb(25, "Building sensor grid")
+        up = _detect_up_vector(mesh.face_normals)
+        face_mask = _get_face_mask(mesh, config, up)
+        logger.info(
+            "Total faces: %d, Selected faces: %d, Surface filter: %s, Up: %s",
+            face_count, int(face_mask.sum()),
+            config.get("surface_filter", "all"), up.tolist(),
+        )
+
+        study_mesh, face_map = _build_study_mesh(mesh, face_mask)
+
+        if mode == "hourly":
+            return _run_hourly(
+                mesh, face_map, face_count, up,
+                epw, config, progress_cb
+            )
+        else:
+            return _run_annual(
+                mesh, face_map, face_count,
+                epw, config, placement, progress_cb, study_mesh, up
+            )
+
 
 # ---------------------------------------------------------------------------
 # Annual / Hourly runners
 # ---------------------------------------------------------------------------
 
 def _run_annual(mesh, face_map, face_count,
-                epw, config, placement, progress_cb, study_mesh):
+                epw, config, placement, progress_cb, study_mesh, up):
     from ladybug.skymatrix import SkyMatrix
     from ladybug_radiance.study.radiation import RadiationStudy
 
@@ -135,10 +141,12 @@ def _run_annual(mesh, face_map, face_count,
     grid_points_full = mesh.triangles_center.astype(np.float32)
     panel_zones = _identify_panel_zones(
         grid_points_full, mesh.face_normals.astype(np.float32),
-        result_values, mesh, placement, config
+        result_values, mesh, placement, config, up
     )
 
-    min_v, max_v, avg_v = _stats(result_values)
+    # Stats computed from selected faces only — zeros for non-selected faces
+    # would make min=0 and avg meaninglessly low.
+    min_v, max_v, avg_v = _stats(values_selected)
     progress_cb(100, "Complete")
     return {
         "mode": "annual",
@@ -146,7 +154,7 @@ def _run_annual(mesh, face_map, face_count,
         "irradiance_values": result_values.tolist(),
         "sensor_points": sensor_points,
         "heatmap_cells": heatmap_cells,
-        "statistics": {"min": min_v, "max": max_v, "avg": avg_v, "total": float(np.sum(result_values))},
+        "statistics": {"min": min_v, "max": max_v, "avg": avg_v, "total": float(np.sum(values_selected))},
         "unit": "kWh/m²",
         "panel_zones": panel_zones,
         "surface_filter": config.get("surface_filter", "all"),
@@ -192,7 +200,8 @@ def _run_hourly(mesh, face_map, face_count, up,
     ]
     heatmap_cells = _build_heatmap_cells(mesh, face_map, values_selected)
 
-    min_v, max_v, avg_v = _stats(result_values)
+    # Stats from selected faces only (non-selected = 0 would skew min/avg)
+    min_v, max_v, avg_v = _stats(values_selected)
     progress_cb(100, "Complete")
     return {
         "mode": "hourly",
@@ -200,7 +209,7 @@ def _run_hourly(mesh, face_map, face_count, up,
         "irradiance_values": result_values.tolist(),
         "sensor_points": sensor_points,
         "heatmap_cells": heatmap_cells,
-        "statistics": {"min": min_v, "max": max_v, "avg": avg_v, "total": float(np.sum(result_values))},
+        "statistics": {"min": min_v, "max": max_v, "avg": avg_v, "total": float(np.sum(values_selected))},
         "unit": "W/m²",
         "panel_zones": [],
         "sun_position": sun_position,
@@ -398,8 +407,7 @@ def _synthetic_hourly_irradiance(
     dhi = weather.get("dhi", 100.0)
     cos_inc = np.clip(grid_normals @ sun_dir, 0, 1)
     irradiance = dni * cos_inc + dhi * 0.5
-    noise = np.random.normal(0, 10, len(grid_normals))
-    return np.clip(irradiance + noise, 0, 1200).astype(np.float32)
+    return np.clip(irradiance, 0, 1200).astype(np.float32)
 
 
 
@@ -421,10 +429,15 @@ def _date_to_hoy(month: int, day: int, hour: int) -> int:
 # Panel zones
 # ---------------------------------------------------------------------------
 
-def _identify_panel_zones(grid_points, grid_normals, values, mesh, placement, config):
+def _identify_panel_zones(grid_points, grid_normals, values, mesh, placement, config, up=None):
     threshold = config.get("min_irradiance", 900)
     high_mask = values >= threshold
-    up = np.array([0.0, 0.0, 1.0])
+    # Use the detected up vector (Y-up for GLB/GLTF, Z-up for OBJ/STL).
+    # Falling back to Z-up only when not provided.
+    if up is None:
+        up = np.array([0.0, 0.0, 1.0])
+    up = np.asarray(up, dtype=np.float64)
+    up = up / (np.linalg.norm(up) or 1.0)
     tilt_angles = np.degrees(np.arccos(np.clip(grid_normals @ up, -1, 1)))
     tilt_mask = (tilt_angles >= 15) & (tilt_angles <= 35)
     candidate_mask = high_mask & tilt_mask

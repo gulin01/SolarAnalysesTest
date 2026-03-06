@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect } from 'react'
-import Map from 'react-map-gl'
+import Map, { Marker } from 'react-map-gl'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import { usePlacementStore } from '@/stores/placementStore'
 import { usePlacementSync } from '@/hooks/usePlacementSync'
@@ -47,20 +47,19 @@ export default function MapPlacer({ projectId, modelGlbUrl, initialPlacement }: 
         >
           <MapSearch />
           {latitude && longitude && (
-            <div
-              style={{
-                position: 'absolute',
-                top: '50%',
-                left: '50%',
-                width: 12,
-                height: 12,
-                borderRadius: '50%',
-                background: '#f59e0b',
-                border: '2px solid white',
-                transform: 'translate(-50%, -50%)',
-                pointerEvents: 'none',
-              }}
-            />
+            <Marker latitude={latitude} longitude={longitude} anchor="center">
+              <div
+                style={{
+                  width: 14,
+                  height: 14,
+                  borderRadius: '50%',
+                  background: '#f59e0b',
+                  border: '2px solid white',
+                  boxShadow: '0 0 0 2px rgba(245,158,11,0.4)',
+                  pointerEvents: 'none',
+                }}
+              />
+            </Marker>
           )}
         </Map>
       </div>
