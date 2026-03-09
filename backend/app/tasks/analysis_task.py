@@ -1,12 +1,21 @@
 """
 Celery task: run solar analysis in the background.
 Worker must use the same DATABASE_URL as the API (e.g. postgres:5432 in Docker, not localhost).
+
+IMPORTANT: Uses sync SQLAlchemy driver in worker to avoid asyncio event loop issues.
+The worker process is synchronous; attempting asyncio.run() repeatedly causes:
+- "Event loop is closed" errors
+- Progress updates failing silently
+- Jobs stuck in "running" state
+
+Solution: sqlalchemy.create_engine(sync driver) instead of create_async_engine.
 """
-import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from signal import SIGTERM
 
 from app.tasks.celery_app import celery_app
 from app.core.storage import download_bytes, upload_bytes
@@ -15,84 +24,121 @@ from app.core.storage import download_bytes, upload_bytes
 from app.models import Project, AnalysisJob  # noqa: F401, E402
 
 logger = logging.getLogger(__name__)
-MAX_UPDATE_RETRIES = 2
+MAX_UPDATE_RETRIES = 5
+RETRY_BACKOFF_INITIAL = 0.5  # seconds
 
 
 def _sync_update_job(job_id: str, **kwargs):
-    """Synchronous DB update via a new event loop. Retries once on failure."""
-    last_exc = None
-    for attempt in range(1, MAX_UPDATE_RETRIES + 1):
-        try:
-            asyncio.run(_async_update_job(job_id, **kwargs))
-            if attempt > 1:
-                logger.info("Job %s DB update succeeded on retry %d", job_id, attempt)
-            return
-        except Exception as e:
-            last_exc = e
-            logger.warning(
-                "Job %s DB update attempt %d/%d failed: %s",
-                job_id, attempt, MAX_UPDATE_RETRIES, e,
-                exc_info=(attempt == MAX_UPDATE_RETRIES),
-            )
-    logger.exception("Failed to update job %s in DB after %d attempts", job_id, MAX_UPDATE_RETRIES)
-    raise last_exc
-
-
-async def _async_update_job(job_id: str, **kwargs):
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+    """Synchronous DB update using sync driver. Retries with exponential backoff on failure."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session as SyncSession
     from app.config import get_settings
     from app.models.analysis import AnalysisJob
 
     settings = get_settings()
-    # Worker must use same DATABASE_URL as API (e.g. postgres:5432 in Docker)
-    engine = create_async_engine(settings.database_url)
-    Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with Session() as db:
-        job = await db.get(AnalysisJob, job_id)
-        if job:
-            for k, v in kwargs.items():
-                setattr(job, k, v)
-            await db.commit()
-    await engine.dispose()
+    
+    # Convert async driver (asyncpg) to sync (psycopg for PostgreSQL)
+    # asyncpg URL: postgresql+asyncpg://user:pass@host/db
+    # psycopg URL: postgresql://user:pass@host/db (psycopg is default)
+    db_url = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+    
+    last_exc = None
+    backoff = RETRY_BACKOFF_INITIAL
+    
+    for attempt in range(1, MAX_UPDATE_RETRIES + 1):
+        try:
+            engine = create_engine(db_url, echo=False)
+            with SyncSession(engine) as session:
+                job = session.get(AnalysisJob, job_id)
+                if job:
+                    for k, v in kwargs.items():
+                        setattr(job, k, v)
+                    session.commit()
+                else:
+                    logger.warning("Job %s not found in DB for update", job_id)
+            engine.dispose()
+            
+            if attempt > 1:
+                logger.info("Job %s DB update succeeded on retry %d", job_id, attempt)
+            return
+            
+        except Exception as e:
+            last_exc = e
+            if attempt < MAX_UPDATE_RETRIES:
+                logger.warning(
+                    "Job %s DB update attempt %d/%d failed: %s. Retrying in %.1fs...",
+                    job_id, attempt, MAX_UPDATE_RETRIES, type(e).__name__, backoff,
+                )
+                time.sleep(backoff)
+                backoff *= 2  # Exponential backoff
+            else:
+                logger.exception(
+                    "Job %s DB update FAILED after %d attempts with error: %s",
+                    job_id, MAX_UPDATE_RETRIES, e,
+                )
+    
+    if last_exc:
+        raise last_exc
 
 
-@celery_app.task(bind=True, name="app.tasks.analysis_task.run_solar_analysis")
+@celery_app.task(
+    bind=True,
+    name="app.tasks.analysis_task.run_solar_analysis",
+    time_limit=600,          # 10 minute hard timeout (kill the task)
+    soft_time_limit=580,     # 9:40 soft timeout (graceful shutdown)
+)
 def run_solar_analysis(self, job_id: str):
     from app.services.solar_engine import run_analysis
+    from celery.exceptions import SoftTimeLimitExceeded
 
     logger.info("Worker received analysis task job_id=%s", job_id)
 
     # Immediately mark running so frontend sees progress
-    _sync_update_job(
-        job_id,
-        status="running",
-        progress=1.0,
-        progress_message="Starting solar analysis",
-    )
+    try:
+        _sync_update_job(
+            job_id,
+            status="running",
+            progress=1.0,
+            progress_message="Starting solar analysis",
+        )
+    except Exception as e:
+        logger.exception("Failed to mark job as running: %s", e)
+        raise
 
     def progress_cb(pct: float, msg: str):
-        logger.info("Job %s progress %.0f%% %s", job_id, pct, msg)
+        """Progress callback — update job status in DB."""
+        logger.info("Job %s progress %.0f%% — %s", job_id, pct, msg)
         try:
             _sync_update_job(job_id, progress=pct, progress_message=msg)
         except Exception as e:
             logger.exception("Job %s progress update failed: %s", job_id, e)
-            raise
+            # Don't raise — allow analysis to continue even if progress update fails
 
     try:
         # Fetch job + project data
+        logger.info("Fetching job data for %s", job_id)
         job_data, project_data, model_data = _fetch_job_data(job_id)
         config = job_data["config"]
+        
+        logger.info("Config: %s", config)
 
         # Download model GLB
+        logger.info("Downloading model GLB from storage")
         glb_bytes = download_bytes(model_data["normalized_glb_path"])
+        logger.info("Downloaded model GLB: %d bytes", len(glb_bytes))
 
-        # Download or locate EPW file — use placement coordinates for the most
-        # accurate PVGIS TMY download; fall back to station-only cache if missing.
+        # Download or locate EPW file
         placement = project_data.get("placement") or {}
         epw_lat = placement.get("latitude")
         epw_lon = placement.get("longitude")
+        logger.info("Placement: lat=%.4f lon=%.4f", epw_lat or 0, epw_lon or 0)
+        
         epw_path = _get_epw_path(config["epw_station_id"], lat=epw_lat, lon=epw_lon)
+        logger.info("Using EPW file: %s (exists=%s)", epw_path, Path(epw_path).exists())
 
+        # Run solar analysis
+        logger.info("Running solar analysis with mode=%s, grid_resolution=%s",
+                   config.get("mode"), config.get("grid_resolution"))
         result = run_analysis(
             glb_bytes=glb_bytes,
             placement=project_data.get("placement") or {},
@@ -101,12 +147,31 @@ def run_solar_analysis(self, job_id: str):
             progress_cb=progress_cb,
         )
 
+        # Validate results
+        irr_values = result.get("irradiance_values", [])
+        if irr_values:
+            logger.info("Analysis results: min=%.2f, max=%.2f, avg=%.2f, unit=%s",
+                       result.get("statistics", {}).get("min", 0),
+                       result.get("statistics", {}).get("max", 0),
+                       result.get("statistics", {}).get("avg", 0),
+                       result.get("unit", ""))
+            if all(v == 0 for v in irr_values if v is not None):
+                logger.warning("WARNING: All irradiance values are ZERO. This may indicate:")
+                logger.warning("  1. Radiance is not installed in worker (check 'rpict -version')")
+                logger.warning("  2. EPW file is missing or invalid: %s", epw_path)
+                logger.warning("  3. Geometry has no valid sensor points (empty mesh or bad normals)")
+        else:
+            logger.warning("Analysis returned NO irradiance values")
+
         # Local storage: storage/{project_id}/analysis/{job_id}/results.json
         project_id = project_data.get("project_id")
         result_json = json.dumps({**result, "job_id": job_id}).encode()
         result_path = f"storage/{project_id}/analysis/{job_id}/results.json"
+        
+        logger.info("Uploading results to storage: %s (%d bytes)", result_path, len(result_json))
         upload_bytes(result_path, result_json, "application/json")
 
+        # Mark complete in DB
         _sync_update_job(
             job_id,
             status="completed",
@@ -115,10 +180,23 @@ def run_solar_analysis(self, job_id: str):
             result_path=result_path,
             completed_at=datetime.now(timezone.utc),
         )
-        logger.info("Analysis task completed job_id=%s", job_id)
+        logger.info("✓ Analysis task COMPLETED for job_id=%s", job_id)
 
+    except SoftTimeLimitExceeded:
+        logger.exception("Job %s exceeded soft time limit (task timeout ~580s)", job_id)
+        try:
+            _sync_update_job(
+                job_id,
+                status="failed",
+                error_message="Analysis timeout: task exceeded 9:40 limit",
+                completed_at=datetime.now(timezone.utc),
+            )
+        except Exception:
+            logger.exception("Failed to mark job as failed after timeout")
+        raise
+        
     except Exception as exc:
-        logger.exception("Analysis task failed job_id=%s: %s", job_id, exc)
+        logger.exception("✗ Analysis task FAILED for job_id=%s: %s", job_id, exc)
         try:
             _sync_update_job(
                 job_id,
@@ -132,32 +210,39 @@ def run_solar_analysis(self, job_id: str):
 
 
 def _fetch_job_data(job_id: str) -> tuple[dict, dict, dict]:
-    return asyncio.run(_async_fetch_job_data(job_id))
-
-
-async def _async_fetch_job_data(job_id: str) -> tuple[dict, dict, dict]:
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+    """Fetch job data using sync SQLAlchemy driver."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session as SyncSession
     from app.config import get_settings
     from app.models.analysis import AnalysisJob
     from app.models.project import Project
     from app.models.model import Model3D
 
     settings = get_settings()
-    engine = create_async_engine(settings.database_url)
-    Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    db_url = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
 
-    async with Session() as db:
-        job = await db.get(AnalysisJob, job_id)
-        project = await db.get(Project, job.project_id)
-        model = await db.get(Model3D, project.model_id)
+    engine = create_engine(db_url, echo=False)
+    try:
+        with SyncSession(engine) as session:
+            job = session.get(AnalysisJob, job_id)
+            if not job:
+                raise ValueError(f"Job {job_id} not found")
+                
+            project = session.get(Project, job.project_id)
+            if not project:
+                raise ValueError(f"Project {job.project_id} not found")
+                
+            model = session.get(Model3D, project.model_id)
+            if not model:
+                raise ValueError(f"Model {project.model_id} not found")
 
-    await engine.dispose()
-
-    return (
-        {"config": job.config, "id": job.id},
-        {"placement": project.placement, "project_id": project.id},
-        {"normalized_glb_path": model.normalized_glb_path},
-    )
+            return (
+                {"config": job.config, "id": job.id},
+                {"placement": project.placement, "project_id": project.id},
+                {"normalized_glb_path": model.normalized_glb_path},
+            )
+    finally:
+        engine.dispose()
 
 
 def _get_epw_path(station_id: str, lat: float | None = None, lon: float | None = None) -> str:

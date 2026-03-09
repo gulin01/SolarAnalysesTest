@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
+import { useSession } from 'next-auth/react'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useAnalysisPolling } from '@/hooks/useAnalysisPolling'
@@ -23,10 +24,20 @@ interface ProgressTrackerProps {
 
 export function ProgressTracker({ projectId, jobId }: ProgressTrackerProps) {
   const { status, progress, progressMessage, setStatus, setProgress } = useAnalysisStore()
+  const { data: session } = useSession()
+  const [wsUrl, setWsUrl] = useState<string | null>(null)
+
+  // Build WebSocket URL with auth token
+  useEffect(() => {
+    const token = (session as any)?.accessToken
+    if (token && jobId) {
+      setWsUrl(`${BASE_WS}/ws/analysis/${jobId}?token=${encodeURIComponent(token)}`)
+    }
+  }, [jobId, session])
 
   // WebSocket for real-time updates
-  useWebSocket(`${BASE_WS}/ws/analysis/${jobId}`, {
-    enabled: status === 'running' || status === 'queued',
+  useWebSocket(wsUrl, {
+    enabled: (status === 'running' || status === 'queued') && !!wsUrl,
     onMessage: (msg) => {
       if (msg.status) setStatus(msg.status as any)
       if (typeof msg.progress === 'number') setProgress(msg.progress, msg.message as string ?? '')

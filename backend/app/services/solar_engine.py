@@ -12,6 +12,12 @@ Pipeline:
 
 The heatmap is rendered as a SEPARATE quad mesh in the frontend,
 NOT as vertex colours on the building mesh.
+
+DEBUGGING: If results show min=0, max=0, check:
+  • Is Radiance installed? Run 'rpict -version'
+  • Is EPW file valid? Check path exists and is not empty
+  • Is mesh valid? Check face count > 0, normals not all pointing inward
+  • Did sensor grid build successfully? Look for "Selected faces" log message
 """
 import logging
 import math
@@ -49,51 +55,75 @@ def run_analysis(
     try:
         import trimesh
     except ImportError as e:
+        logger.exception("trimesh import failed: %s", e)
         return _synthetic_result(None, placement, config, str(e), n=500)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
         glb_file = tmpdir / "model.glb"
         glb_file.write_bytes(glb_bytes)
+        
+        logger.info("Loading model from GLB (%d bytes)", len(glb_bytes))
         scene = trimesh.load(str(glb_file))
         mesh = scene.dump(concatenate=True) if isinstance(scene, trimesh.Scene) else scene
+        
+        logger.info("Loaded mesh: %d faces, %d vertices", len(mesh.faces), len(mesh.vertices))
+        
         if not _is_triangulated(mesh):
+            logger.info("Mesh is not triangulated, triangulating...")
             try:
                 mesh = mesh.triangulate()
+                logger.info("Re-loaded mesh after triangulation: %d faces, %d vertices", len(mesh.faces), len(mesh.vertices))
             except AttributeError:
+                logger.warning("Could not triangulate mesh")
                 pass
 
+        # CRITICAL: Fix mesh normals if pointing inward (all toward centroid)
+        # This causes radiation values to be zero because rays shoot into the building instead of sky
+        logger.info("Checking mesh normals for inward-pointing faces...")
+        mesh = _fix_mesh_normals(mesh)
+
         face_count = len(mesh.faces)
+        logger.info("Mesh ready: %d faces, area=%.2f m²", face_count, float(mesh.area))
 
         try:
             from ladybug.epw import EPW  # noqa: F401
         except ImportError as e:
-            logger.info(
-                "Ladybug not available (%s); using synthetic irradiance for %d faces",
-                e, face_count,
-            )
+            logger.warning("Ladybug not available (%s); using synthetic irradiance for %d faces", e, face_count)
             return _synthetic_result(mesh, placement, config, str(e), n=face_count)
 
         try:
             progress_cb(15, "Loading weather data")
+            logger.info("Loading EPW from: %s", epw_path)
+            if not Path(epw_path).exists():
+                logger.warning("EPW file not found: %s. Using synthetic results.", epw_path)
+                return _synthetic_result(mesh, placement, config, f"EPW not found: {epw_path}", n=face_count)
+                
             epw = EPW(epw_path)
+            logger.info("Loaded EPW for %s, %s. Total solar radiation: %.1f kWh/m²",
+                       epw.location.city, epw.location.country,
+                       epw.direct_normal_radiation.sum() + epw.diffuse_horizontal_radiation.sum())
         except Exception as e:
-            logger.warning(
-                "EPW file could not be loaded (%s); using synthetic irradiance for %d faces",
-                e, face_count,
-            )
+            logger.warning("EPW file could not be loaded (%s); using synthetic irradiance for %d faces", e, face_count)
             return _synthetic_result(mesh, placement, config, str(e), n=face_count)
 
         progress_cb(25, "Building sensor grid")
         up = _detect_up_vector(mesh.face_normals)
         face_mask = _get_face_mask(mesh, config, up)
+        selected_count = int(face_mask.sum())
         logger.info(
-            "Total faces: %d, Selected faces: %d, Surface filter: %s, Up: %s",
-            face_count, int(face_mask.sum()),
+            "Face filtering: total=%d, selected=%d, filter=%s, up=%s",
+            face_count, selected_count,
             config.get("surface_filter", "all"), up.tolist(),
         )
+        
+        if selected_count == 0:
+            logger.warning("No faces selected after filtering! Using all faces.")
+            face_mask = np.ones(face_count, dtype=bool)
+            selected_count = face_count
 
         study_mesh, face_map = _build_study_mesh(mesh, face_mask)
+        logger.info("Study mesh built: %d selected faces", len(face_map))
 
         if mode == "hourly":
             try:
@@ -372,8 +402,52 @@ def _stats(values: np.ndarray):
 
 
 # ---------------------------------------------------------------------------
-# Up-vector detection
+# Up-vector detection & mesh normal fixing
 # ---------------------------------------------------------------------------
+
+def _fix_mesh_normals(mesh):
+    """
+    Check if mesh normals point inward (toward centroid) and flip if necessary.
+    This is critical: inward-pointing normals cause radiation queries to return zero.
+    """
+    try:
+        centroid = mesh.centroid
+        inward_count = 0
+        outward_count = 0
+        
+        for face_idx in range(len(mesh.face_normals)):
+            face_center = mesh.triangles_center[face_idx]
+            normal = mesh.face_normals[face_idx]
+            direction_to_center = centroid - face_center
+            
+            # Dot product < 0 means normal points away from centroid (good/outward)
+            # Dot product > 0 means normal points toward centroid (bad/inward)
+            if np.dot(normal, direction_to_center) > 0:
+                inward_count += 1
+            else:
+                outward_count += 1
+        
+        logger.info("Mesh normal check: outward=%d, inward=%d", outward_count, inward_count)
+        
+        # If >90% of normals point inward, something is wrong — flip all faces
+        if inward_count > len(mesh.faces) * 0.9:
+            logger.warning("CRITICAL: %.1f%% of mesh normals point INWARD (toward centroid)!",
+                          100.0 * inward_count / len(mesh.faces))
+            logger.warning("Flipping all face winding to fix normals...")
+            mesh.faces[:] = mesh.faces[:, ::-1]  # Flip vertex order
+            logger.info("Mesh normals flipped. New check: outward=%d, inward=%d",
+                       sum(1 for i in range(len(mesh.face_normals))
+                           if np.dot(mesh.face_normals[i], 
+                                   centroid - mesh.triangles_center[i]) <= 0),
+                       sum(1 for i in range(len(mesh.face_normals))
+                           if np.dot(mesh.face_normals[i], 
+                                   centroid - mesh.triangles_center[i]) > 0))
+        
+        return mesh
+    except Exception as e:
+        logger.warning("Failed to check/fix mesh normals: %s. Continuing with original mesh.", e)
+        return mesh
+
 
 def _detect_up_vector(face_normals: np.ndarray) -> np.ndarray:
     """Auto-detect Y-up (glTF) vs Z-up (OBJ/STL) from face normals."""

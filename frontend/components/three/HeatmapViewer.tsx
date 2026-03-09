@@ -18,14 +18,14 @@ interface HeatmapViewerProps {
 }
 
 // ---------------------------------------------------------------------------
-// Color ramp  (blue → yellow → red)
+// Color ramp  (blue → cyan → green → yellow → red) — brightened for visibility
 // ---------------------------------------------------------------------------
 const COLOR_STOPS = [
-  { t: 0.0,  r: 49/255,  g: 54/255,  b: 149/255 },
-  { t: 0.25, r: 69/255,  g: 117/255, b: 180/255 },
-  { t: 0.5,  r: 1.0,     g: 1.0,     b: 191/255 },
-  { t: 0.75, r: 244/255, g: 109/255, b: 67/255  },
-  { t: 1.0,  r: 165/255, g: 0,       b: 38/255  },
+  { t: 0.0,  r: 0.2,     g: 0.4,     b: 0.9 },   // bright blue
+  { t: 0.25, r: 0.0,     g: 0.8,     b: 1.0 },   // cyan
+  { t: 0.5,  r: 0.0,     g: 1.0,     b: 0.0 },   // lime green
+  { t: 0.75, r: 1.0,     g: 1.0,     b: 0.0 },   // yellow
+  { t: 1.0,  r: 1.0,     g: 0.2,     b: 0.0 },   // red-orange
 ]
 
 function valueToColor(value: number, minV: number, maxV: number): [number, number, number] {
@@ -75,13 +75,14 @@ function buildHeatmapMesh(cells: HeatmapCell[], minV: number, maxV: number): THR
   geo.setAttribute('cellIdx',  new THREE.BufferAttribute(cellIndex, 1))
   geo.computeVertexNormals()
 
-  const mat = new THREE.MeshStandardMaterial({
+  // Use BasicMaterial for heatmap: vertex colors are always bright and don't depend on lighting
+  // This ensures the heatmap colors are visible regardless of light angle or intensity
+  const mat = new THREE.MeshBasicMaterial({
     vertexColors: true,
     side: THREE.DoubleSide,
-    roughness: 0.7,
-    metalness: 0.0,
     transparent: true,
-    opacity: 0.92,
+    opacity: 0.9,
+    toneMapped: false,  // Disable tone mapping to keep colors vibrant
   })
   return new THREE.Mesh(geo, mat)
 }
@@ -267,10 +268,12 @@ export default function HeatmapViewer({ projectId, modelGlbUrl, latestJobId }: H
   return (
     <div className="h-full flex">
       <div className="flex-1 relative">
-        <Canvas camera={{ position: [10, 10, 10], fov: 50 }}>
-          <hemisphereLight args={['#c8d8f0', '#444450', 0.8]} />
-          <directionalLight position={[15, 25, 15]} intensity={1.2} />
-          <directionalLight position={[-10, 15, -10]} intensity={0.4} />
+        <Canvas camera={{ position: [15, 15, 15], fov: 50 }}>
+          {/* Bright lighting setup for heatmap visibility */}
+          <ambientLight intensity={0.6} />
+          <hemisphereLight args={['#e8f4f8', '#444450', 0.5]} />
+          <directionalLight position={[20, 30, 20]} intensity={1.5} />
+          <directionalLight position={[-15, 20, -10]} intensity={0.6} />
           <Suspense fallback={null}>
             <Bounds fit clip observe>
               <Center>
@@ -282,7 +285,7 @@ export default function HeatmapViewer({ projectId, modelGlbUrl, latestJobId }: H
             </Bounds>
           </Suspense>
           <OrbitControls makeDefault />
-          <gridHelper args={[20, 20]} />
+          <gridHelper args={[20, 20]} strokeDasharray={[2, 2]} />
         </Canvas>
 
         {results && viewMode === 'heatmap' && (() => {

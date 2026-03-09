@@ -20,12 +20,21 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
         # Ensure analysis_jobs.analysis_mode exists (add if missing; no-op if already there)
         await run_startup_schema_checks(conn)
-        # Seed dev user so auth-free testing works
-        await conn.execute(text("""
-            INSERT INTO users (id, email, name, hashed_password, created_at)
-            VALUES (:id, :email, :name, :pwd, NOW())
-            ON CONFLICT (id) DO NOTHING
-        """), {"id": DEV_USER_ID, "email": "dev@local", "name": "Dev User", "pwd": "dev-no-auth"})
+        
+        # Only seed dev user in DEBUG mode
+        if settings.debug:
+            from app.core.auth import hash_password
+            dev_pwd_hash = hash_password("dev-password-change-me")
+            await conn.execute(text("""
+                INSERT INTO users (id, email, name, hashed_password, created_at)
+                VALUES (:id, :email, :name, :pwd, NOW())
+                ON CONFLICT (id) DO NOTHING
+            """), {
+                "id": DEV_USER_ID,
+                "email": "dev@example.local",
+                "name": "Dev User",
+                "pwd": dev_pwd_hash,
+            })
     yield
 
 
@@ -41,8 +50,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Only allow standard safe HTTP methods; explicitly exclude * for security
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    # Only allow necessary headers; exclude * for security
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # REST routers

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { ArrowRight, Trash2 } from 'lucide-react'
@@ -22,16 +22,20 @@ export function ProjectCard({ project }: { project: Project }) {
   const router = useRouter()
   const [deleting, setDeleting] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const inFlight = useRef(false)
 
   async function handleDelete() {
+    if (inFlight.current) return   // prevent double-fire
+    inFlight.current = true
     setDeleting(true)
     setConfirming(false)
     try {
       await apiClient.delete(`/projects/${project.id}`)
       toast.success('Project deleted')
-      router.refresh()
+      router.push('/projects')   // navigate away so deleted project pages are never re-rendered
     } catch {
       toast.error('Failed to delete project')
+      inFlight.current = false
       setDeleting(false)
     }
   }

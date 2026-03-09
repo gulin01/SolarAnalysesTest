@@ -1,5 +1,6 @@
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
+import { notFound } from 'next/navigation'
 import { fetchProject } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 
@@ -16,8 +17,13 @@ function absoluteModelUrl(url: string | undefined): string | null {
 }
 
 export default async function ResultsPage({ params }: { params: { id: string } }) {
-  const project = await fetchProject(params.id)
-  const modelGlbUrl = absoluteModelUrl(project.model?.normalized_glb_url) ?? null
+  let project
+  try {
+    project = await fetchProject(params.id)
+  } catch {
+    notFound()
+  }
+  const modelGlbUrl = absoluteModelUrl(project!.model?.normalized_glb_url) ?? null
   const hasModel = !!modelGlbUrl
 
   return (
@@ -48,7 +54,7 @@ export default async function ResultsPage({ params }: { params: { id: string } }
           <HeatmapViewer
             projectId={params.id}
             modelGlbUrl={modelGlbUrl}
-            latestJobId={project.latest_job_id ?? null}
+            latestJobId={project!.latest_job_id ?? null}
           />
         )}
       </div>

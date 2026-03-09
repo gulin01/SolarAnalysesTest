@@ -53,6 +53,20 @@ DEV_USER_ID = "dev-user"
 async def get_current_user_id(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ) -> str:
+    """Extract and validate JWT token from Authorization header.
+    
+    Development mode: allows unauthenticated requests (returns DEV_USER_ID).
+    Production mode: requires valid Bearer token.
+    """
     if not credentials:
-        return DEV_USER_ID
+        if settings.debug:
+            # Only allow unauthenticated access in DEBUG mode
+            return DEV_USER_ID
+        else:
+            # Production: reject unauthenticated requests
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing authorization credentials",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
     return decode_token(credentials.credentials)
